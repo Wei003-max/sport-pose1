@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>体育课姿态识别｜跳绳&立定跳远</title>
+    <!-- 【国内jsdelivr CDN，替换谷歌CDN，Edge/华为浏览器优先】 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.14.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.0/dist/pose-detection.min.js"></script>
+    <style>
+        * {margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system}
+        html,body {background:#111;color:#fff;overflow-x:hidden}
+        .container {padding:10px;max-width:100vw}
+        h2 {text-align:center;font-size:18px;margin-bottom:10px}
+        .control {display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+        button {padding:14px 8px;font-size:16px;border:none;border-radius:10px;background:#2563eb;color:#fff;min-height:50px}
+        button.stop {background:#dc2626}
+        button.mode-active {background:#22c55e}
+        .info {background:#222;padding:12px;border-radius:10px;margin:10px 0;line-height:1.8;font-size:16px}
+        .canvas-wrap {position:relative;width:100%;overflow:hidden;border-radius:10px}
+        video, canvas {width:100%;display:block;object-fit:cover}
+        canvas {position:absolute;top:0;left:0}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h2>体育课姿态识别（Edge/华为浏览器版）</h2>
+    <div class="control">
+        <button id="startBtn">开启摄像头</button>
+        <button id="stopBtn" class="stop">关闭摄像头</button>
+        <button id="modeRope">跳绳模式</button>
+        <button id="modeJump">立定跳远模式</button>
+        <button id="resetBtn">重置计数</button>
+    </div>
+    <div class="info">
+        当前模式：<span id="currentMode">跳绳</span><br>
+        跳绳计数：<span id="count">0</span><br>
+        状态提示：<span id="feedback">正在加载AI模型，请耐心等待...</span>
+    </div>
+    <div class="canvas-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+    </div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const resetBtn = document.getElementById('resetBtn');
+const modeRopeBtn = document.getElementById('modeRope');
+const modeJumpBtn = document.getElementById('modeJump');
+const modeText = document.getElementById('currentMode');
+const countText = document.getElementById('count');
+const feedbackText = document.getElementById('feedback');
+
+let detector = null;
+let stream = null;
+let isRunning = false;
+let mode = "rope"; // rope跳绳 / longjump立定跳远
+let count = 0;
+let prevAnkleY = 0;
+let jumpState = "stand";
+
+// 火柴人骨架连接（COCO17关键点）
+const SKELETON = [
+    [0,1],[0,2],[1,3],[2,4], //头
+    [5,6],[5,7],[7,9],[6,8],[8,10], //手臂
+    [5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16] //躯干+腿
+];
+
+// 加载MoveNet Lightning（手机高速版），增加错误捕获
+async function loadModel() {
+    try {
+        feedbackText.innerText="正在加载姿态识别模型...";
+        detector = await poseDetection.createDetector(
+            poseDetection.SupportedModels.MoveNet,
+            {modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING}
+        );
+        feedbackText.innerText="✅模型加载完成！点击开启摄像头";
+    }catch(err){
+        console.error("模型加载错误：",err);
+        feedbackText.innerText="❌模型加载失败！网络问题，请切换网络或使用内网Live Server方案";
+    }
+}
+
+// 开启后置摄像头，适配华为/Edge浏览器
+async function startCamera() {
+    if(isRunning || !detector) return;
+    try{
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment", width:{ideal:640}, height:{ideal:960} },
+            audio:false
+        });
+        video.srcObject = stream;
+        await new Promise(res=>video.onloadedmetadata=res);
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        isRunning = true;
+        detectLoop();
+    }catch(err){
+        feedbackText.innerText="❌摄像头开启失败，请授予相机权限";
+        console.error("摄像头错误",err);
+    }
+}
+
+function stopCamera(){
+    if(stream) stream.getTracks().forEach(t=>t.stop());
+    isRunning = false;
+}
+
+// 循环姿态检测
+async function detectLoop(){
+    if(!isRunning || !detector) return;
+    const poses = await detector.estimatePoses(video);
+    if(poses.length>0){
+        const pose = poses[0];
+        drawSkeleton(pose);
+        judgeAction(pose);
+    }else{
+        feedbackText.innerText="⚠️ 未识别全身，请站远一点，从头到脚放入画面";
+    }
+    requestAnimationFrame(detectLoop);
+}
+
+// 绘制火柴人
+function drawSkeleton(pose){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    const kps = pose.keypoints;
+    //画关键点
+    kps.forEach(kp=>{
+        if(kp.score>0.4){
+            ctx.beginPath();
+            ctx.arc(kp.x, kp.y, 5,0,2*Math.PI);
+            ctx.fillStyle="#00ff41";
+            ctx.fill();
+        }
+    })
+    //画骨架连线
+    SKELETON.forEach(([a,b])=>{
+        const p1 = kps[a], p2=kps[b];
+        if(p1.score>0.4 && p2.score>0.4){
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.strokeStyle="#00ff41";
+            ctx.lineWidth=3;
+            ctx.stroke();
+        }
+    })
+}
+
+// 计算关节角度
+function getAngle(p1,p2,p3){
+    const v1x = p1.x - p2.x;
+    const v1y = p1.y - p2.y;
+    const v2x = p3.x - p2.x;
+    const v2y = p3.y - p2.y;
+    const dot = v1x*v2x + v1y*v2y;
+    const mag1 = Math.hypot(v1x, v1y);
+    const mag2 = Math.hypot(v2x, v2y);
+    const rad = Math.acos(dot/(mag1*mag2));
+    return rad*180/Math.PI;
+}
+
+// 动作判定逻辑
+function judgeAction(pose){
+    const kp = pose.keypoints;
+    //髋、膝、踝关键点
+    const lHip = kp[11], rHip = kp[12];
+    const lKnee = kp[13], rKnee = kp[14];
+    const lAnkle = kp[15], rAnkle = kp[16];
+    const minScore = 0.4;
+    if([lHip,rHip,lKnee,rKnee,lAnkle,rAnkle].some(p=>p.score<minScore)){
+        feedbackText.innerText="⚠️ 全身识别不全，从头到脚放入画面";
+        return;
+    }
+
+    if(mode === "rope"){
+        //跳绳计数
+        const ankleY = (lAnkle.y + rAnkle.y)/2;
+        if(jumpState === "stand"){
+            if(ankleY > prevAnkleY + 6){
+                jumpState = "up";
+            }
+        }else if(jumpState === "up"){
+            if(ankleY < prevAnkleY -6){
+                count++;
+                countText.innerText = count;
+                jumpState = "stand";
+                //判断屈膝姿态
+                const kneeAvgY = (lKnee.y + rKnee.y)/2;
+                const hipAvgY = (lHip.y + rHip.y)/2;
+                const bend = kneeAvgY - hipAvgY;
+                if(bend>25){
+                    feedbackText.innerText="✅ 跳绳姿态不错，屈膝缓冲到位";
+                }else{
+                    feedbackText.innerText="⚠️ 膝盖弯曲太少，尽量轻微屈膝缓冲";
+                }
+            }
+        }
+        prevAnkleY = ankleY;
+    }else if(mode === "longjump"){
+        //立定跳远：膝盖角度判断预摆屈膝
+        const lKneeAngle = getAngle(lHip, lKnee, lAnkle);
+        const rKneeAngle = getAngle(rHip, rKnee, rAnkle);
+        const kneeAngle = (lKneeAngle + rKneeAngle)/2;
+        if(kneeAngle < 95){
+            feedbackText.innerText="✅ 屈膝充分，预摆动作标准";
+        }else if(kneeAngle >140){
+            feedbackText.innerText="⚠️ 膝盖几乎没弯，下蹲预摆不足";
+        }else{
+            feedbackText.innerText="🟡 屈膝一般，可以再多下蹲一点";
+        }
+    }
+}
+
+//按钮事件
+startBtn.onclick = startCamera;
+stopBtn.onclick = stopCamera;
+resetBtn.onclick = ()=>{
+    count=0; countText.innerText=0; jumpState="stand"; prevAnkleY=0;
+};
+modeRopeBtn.onclick = ()=>{
+    mode="rope"; modeText.innerText="跳绳";
+    modeRopeBtn.classList.add("mode-active");
+    modeJumpBtn.classList.remove("mode-active");
+    feedbackText.innerText="跳绳模式就绪";
+};
+modeJumpBtn.onclick = ()=>{
+    mode="longjump"; modeText.innerText="立定跳远";
+    modeJumpBtn.classList.add("mode-active");
+    modeRopeBtn.classList.remove("mode-active");
+    feedbackText.innerText="立定跳远模式就绪";
+};
+
+//加载模型
+loadModel();
+</script>
+</body>
+</html>
